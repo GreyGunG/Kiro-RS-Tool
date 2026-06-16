@@ -488,7 +488,39 @@ impl ToolJsonAccumulator {
         }))
     }
 
-    pub fn finish(&mut self) -> Result<(), ToolJsonAccumulatorError> {
+    /// 流结束时处理仍未闭合（未收到 stop=true）的工具缓冲。
+    ///
+    /// 区分两种 dangling buffer：
+    /// - **空缓冲**（input 去空白后为空）：这类工具（如 EnterPlanMode / ExitPlanMode / Agent 等
+    ///   无参数工具）上游可能只发了 toolUse 事件而未补 stop 分片，但其参数本就该是 `{}`。
+    ///   与 [`Self::push`] 对"收到 stop 的空输入"的处理保持一致——当作合法工具发出，**不报错**。
+    /// - **非空但 JSON 不完整**：真正被截断的半截 JSON（如大 Write/Edit 参数被上游截断）。
+    ///   仍返回 [`ToolJsonAccumulatorError::IncompleteJson`]，保留对客户端的防护，避免把半截参数
+    ///   泄漏给 Claude Code 触发工具执行失败 / 会话卡死。
+    ///
+    /// 返回成功"补发"的空参数工具（可能多个）；若存在非空残缺缓冲（半截 JSON），
+    /// 取其中最长的一个作为代表返回 Err。
+    pub fn finish(
+        &mut self,
+        tool_name_map: &HashMap<String, String>,
+    ) -> Result<Vec<CompletedToolUse>, ToolJsonAccumulatorError> {
+        // 先弹出全部空缓冲，按合法 `{}` 工具补发（与 push 的空输入分支同构）。
+        let empty_ids: Vec<String> = self
+            .buffers
+            .iter()
+            .filter(|(_, (_, input))| input.trim().is_empty())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut completed = Vec::with_capacity(empty_ids.len());
+        for id in empty_ids {
+            if let Some((kiro_name, _)) = self.buffers.remove(&id) {
+                let (name, input) =
+                    restore_tool_use_for_client(&kiro_name, serde_json::json!({}), tool_name_map);
+                completed.push(CompletedToolUse { id, name, input });
+            }
+        }
+
+        // 剩下的都是非空但未闭合的缓冲：真正的半截 JSON，仍按残缺报错（取最长的一个作代表）。
         if let Some((tool_use_id, (name, input))) = self
             .buffers
             .iter()
@@ -502,7 +534,7 @@ impl ToolJsonAccumulator {
                 bytes: input.len(),
             });
         }
-        Ok(())
+        Ok(completed)
     }
 }
 
@@ -1448,6 +1480,15 @@ impl StreamContext {
             }
         };
 
+        events.extend(self.emit_completed_tool_use(completed));
+        events
+    }
+
+    /// 把一个已完成（参数完整或空参数）的 tool_use 渲染为 content_block start/delta/stop 事件序列。
+    /// 由流式增量路径（[`Self::handle_tool_use`]）与流结束补发路径（`finish` 的空缓冲工具）共用。
+    fn emit_completed_tool_use(&mut self, completed: CompletedToolUse) -> Vec<SseEvent> {
+        let mut events = Vec::new();
+
         // 获取或分配块索引
         let block_index = if let Some(&idx) = self.tool_block_indices.get(&completed.id) {
             idx
@@ -1501,12 +1542,20 @@ impl StreamContext {
     pub fn generate_final_events(&mut self) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
-        if self.tool_json_error.is_none()
-            && let Err(e) = self.tool_json_accumulator.finish()
-        {
-            tracing::error!("{}", e);
-            self.tool_json_error = Some(e);
-            self.state_manager.set_stop_reason("error");
+        // 流结束时处理未闭合的工具缓冲：空参数工具补发为合法 tool_use，半截 JSON 仍报错。
+        if self.tool_json_error.is_none() {
+            match self.tool_json_accumulator.finish(&self.tool_name_map) {
+                Ok(pending) => {
+                    for completed in pending {
+                        events.extend(self.emit_completed_tool_use(completed));
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("{}", e);
+                    self.tool_json_error = Some(e);
+                    self.state_manager.set_stop_reason("error");
+                }
+            }
         }
 
         let remaining_filtered_text = self.tool_use_xml_filter.finish();
@@ -2169,9 +2218,75 @@ mod tests {
             .unwrap();
         assert!(partial.is_none());
 
-        let err = acc.finish().unwrap_err();
+        let err = acc.finish(&HashMap::new()).unwrap_err();
         assert_eq!(err.error_type(), "upstream_tool_json_error");
         assert!(err.message().contains("tool_truncated"));
+        assert!(err.message().contains("ended before completing"));
+    }
+
+    // 回归测试（原阶段 1A 复现测试，阶段 3A 翻转为修复后期望）：
+    // 空参数工具（EnterPlanMode/ExitPlanMode/Agent）上游只发 toolUse 事件、未补 stop=true，
+    // 留下 0 字节 dangling buffer。修复后 finish() 不再报错，而是把它当作合法 input:{} 工具补发。
+    // 与 push() 对"收到 stop 的空输入"的处理保持一致；这消除了 sub2api 的 "buffered 0 bytes" 502。
+    #[test]
+    fn test_enterplanmode_empty_buffer_emitted_as_valid_tool() {
+        use crate::kiro::model::events::ToolUseEvent;
+
+        let mut acc = ToolJsonAccumulator::new();
+        let pending = acc
+            .push(
+                &ToolUseEvent {
+                    name: "EnterPlanMode".to_string(),
+                    tool_use_id: "tp".to_string(),
+                    input: String::new(),
+                    stop: false,
+                },
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(pending.is_none());
+
+        // 修复后：finish() 返回 Ok，并把空参数工具作为合法 tool_use 补发。
+        let completed = acc.finish(&HashMap::new()).unwrap();
+        assert_eq!(completed.len(), 1, "空参数工具应被补发为 1 个合法 tool_use");
+        assert_eq!(completed[0].id, "tp");
+        assert_eq!(completed[0].name, "EnterPlanMode");
+        assert_eq!(completed[0].input, serde_json::json!({}));
+    }
+
+    // 同时验证：空缓冲被补发后，accumulator 不再残留，再次 finish() 为干净的 Ok(vec![])。
+    #[test]
+    fn test_finish_empty_and_truncated_mixed() {
+        use crate::kiro::model::events::ToolUseEvent;
+
+        let mut acc = ToolJsonAccumulator::new();
+        // 一个空参数工具（应补发）
+        acc.push(
+            &ToolUseEvent {
+                name: "EnterPlanMode".to_string(),
+                tool_use_id: "empty".to_string(),
+                input: String::new(),
+                stop: false,
+            },
+            &HashMap::new(),
+        )
+        .unwrap();
+        // 一个真正被截断的半截 JSON（应仍报错，防护保留）
+        acc.push(
+            &ToolUseEvent {
+                name: "fs_write".to_string(),
+                tool_use_id: "truncated".to_string(),
+                input: r#"{"path":"/tmp/a.txt","text":"#.to_string(),
+                stop: false,
+            },
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        // 混合场景：半截 JSON 仍触发 IncompleteJson（不会被空缓冲处理掩盖）。
+        let err = acc.finish(&HashMap::new()).unwrap_err();
+        assert_eq!(err.error_type(), "upstream_tool_json_error");
+        assert!(err.message().contains("truncated"));
         assert!(err.message().contains("ended before completing"));
     }
 
@@ -2260,6 +2375,105 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("tool_truncated")
+        );
+    }
+
+    // 流式：空参数工具（如 EnterPlanMode）在流结束时仍未收到 stop，
+    // generate_final_events 应把它补发为合法 tool_use 块（input {}），而非报错。
+    #[test]
+    fn test_stream_empty_param_tool_emitted_at_finish() {
+        use crate::kiro::model::events::ToolUseEvent;
+
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, HashMap::new());
+        let _ = ctx.generate_initial_events();
+
+        // 上游只发了 toolUse 事件（空 input、无 stop），未补 stop 分片。
+        let part = ctx.process_kiro_event(&Event::ToolUse(ToolUseEvent {
+            name: "EnterPlanMode".to_string(),
+            tool_use_id: "tp".to_string(),
+            input: String::new(),
+            stop: false,
+        }));
+        assert!(
+            part.iter().all(|e| e.event != "content_block_start"
+                || e.data["content_block"]["type"] != "tool_use"),
+            "未 stop 前不应开 tool_use 块"
+        );
+
+        let final_events = ctx.generate_final_events();
+        // 不应有 error 块
+        assert!(
+            final_events.iter().all(|e| e.event != "error"),
+            "空参数工具不应触发 error 块"
+        );
+        // 应补发一个 EnterPlanMode 的 tool_use 块（input 为空对象）
+        let start = final_events
+            .iter()
+            .find(|e| {
+                e.event == "content_block_start" && e.data["content_block"]["type"] == "tool_use"
+            })
+            .expect("空参数工具应被补发为 tool_use 块");
+        assert_eq!(start.data["content_block"]["name"], "EnterPlanMode");
+        assert_eq!(start.data["content_block"]["id"], "tp");
+        // 块序应有对应的 content_block_stop
+        assert!(
+            final_events
+                .iter()
+                .any(|e| e.event == "content_block_stop"),
+            "补发的 tool_use 块应正常闭合"
+        );
+    }
+
+    // 流式混合：一个空参数工具 + 一个被截断的半截 JSON 同时 dangling。
+    // 半截 JSON 仍应触发 error 块，且**绝不能**为半截工具发出任何 tool_use 块。
+    // （空工具是否补发不在本断言范围——本测试聚焦防护未被掩盖。）
+    #[test]
+    fn test_stream_mixed_empty_and_truncated_emits_error_no_partial_block() {
+        use crate::kiro::model::events::ToolUseEvent;
+
+        let mut map = HashMap::new();
+        map.insert("fs_write".to_string(), "Write".to_string());
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, map);
+        let _ = ctx.generate_initial_events();
+
+        ctx.process_kiro_event(&Event::ToolUse(ToolUseEvent {
+            name: "EnterPlanMode".to_string(),
+            tool_use_id: "empty".to_string(),
+            input: String::new(),
+            stop: false,
+        }));
+        ctx.process_kiro_event(&Event::ToolUse(ToolUseEvent {
+            name: "fs_write".to_string(),
+            tool_use_id: "truncated".to_string(),
+            input: r#"{"path":"/tmp/a.txt","text":"#.to_string(),
+            stop: false,
+        }));
+
+        let final_events = ctx.generate_final_events();
+
+        // 半截 JSON 触发 error 块
+        let error = final_events
+            .iter()
+            .find(|e| e.event == "error")
+            .expect("半截 JSON 应触发 error 块");
+        assert_eq!(
+            error.data["error"]["type"],
+            serde_json::json!("upstream_tool_json_error")
+        );
+        assert!(
+            error.data["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("truncated")
+        );
+        // 绝不能为被截断的工具发出 tool_use 块（防止半截参数泄漏给客户端）
+        assert!(
+            final_events.iter().all(|e| {
+                e.event != "content_block_start"
+                    || e.data["content_block"]["type"] != "tool_use"
+                    || e.data["content_block"]["id"] != "truncated"
+            }),
+            "被截断的工具绝不能被发出为 tool_use 块"
         );
     }
 

@@ -1255,31 +1255,44 @@ async fn handle_non_stream_request(
         }
     }
 
-    if let Err(e) = tool_accumulator.finish() {
-        tracing::error!("{}", e);
-        let total_input = resolve_usage_input_tokens(input_tokens, context_input_tokens);
-        let (input, cache_creation, cache_read) = cache_plan.split_against_total(total_input);
-        hook.record(
-            credential_id,
-            input,
-            0,
-            cache_creation,
-            cache_read,
-            credits,
-            "error",
-        );
-        tracer.set_usage(input, 0, cache_creation, cache_read);
-        tracer.finalize(
-            "error",
-            Some(outcome::BAD_REQUEST),
-            Some(&e.message()),
-            None,
-        );
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new(e.error_type(), e.message())),
-        )
-            .into_response();
+    match tool_accumulator.finish(&tool_name_map) {
+        Ok(pending) => {
+            // 空参数工具（EnterPlanMode 等）补发为合法 tool_use，与流式增量路径一致。
+            for completed in pending {
+                tool_uses.push(json!({
+                    "type": "tool_use",
+                    "id": completed.id,
+                    "name": completed.name,
+                    "input": completed.input
+                }));
+            }
+        }
+        Err(e) => {
+            tracing::error!("{}", e);
+            let total_input = resolve_usage_input_tokens(input_tokens, context_input_tokens);
+            let (input, cache_creation, cache_read) = cache_plan.split_against_total(total_input);
+            hook.record(
+                credential_id,
+                input,
+                0,
+                cache_creation,
+                cache_read,
+                credits,
+                "error",
+            );
+            tracer.set_usage(input, 0, cache_creation, cache_read);
+            tracer.finalize(
+                "error",
+                Some(outcome::BAD_REQUEST),
+                Some(&e.message()),
+                None,
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse::new(e.error_type(), e.message())),
+            )
+                .into_response();
+        }
     }
     text_content = crate::kiro::model::events::strip_tool_use_xml_leaks(&text_content);
 

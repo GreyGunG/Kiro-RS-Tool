@@ -559,6 +559,23 @@ pub async fn handle_websearch_request(
         .unwrap()
 }
 
+/// 判断 MCP 错误是否表示"搜索无结果"（而非真正的故障）。
+///
+/// 上游 Kiro MCP 对命中不到结果的查询会返回 JSON-RPC error code `-32602`
+/// 且 message 为 "Tool returned no results"（HTTP 层为 200）。这是**空结果信号**，
+/// 不是上游故障：必须当作空搜索结果优雅返回，让模型据"无结果"继续作答，而**不能**升级为 502。
+///
+/// 判定以 **message 短语**为准（"no results"），而非裸 error code：`-32602` 是 JSON-RPC 标准的
+/// "Invalid params" 通用码，单凭它会把真正的畸形请求错误误吞成"无结果"。因此要求 message 命中
+/// "no results" 短语；其它 error code、传输层错误、以及 message 不含该短语的 `-32602`（真·参数错误）
+/// 仍按真故障处理（保持 `bail!` → 502）。
+pub(crate) fn is_no_results_error(error: &McpError) -> bool {
+    error
+        .message
+        .as_deref()
+        .is_some_and(|m| m.to_ascii_lowercase().contains("no results"))
+}
+
 /// 调用 Kiro MCP API
 pub(crate) async fn call_mcp_api(
     provider: &crate::kiro::provider::KiroProvider,
@@ -576,6 +593,22 @@ pub(crate) async fn call_mcp_api(
     let mcp_response: McpResponse = serde_json::from_str(&body)?;
 
     if let Some(ref error) = mcp_response.error {
+        // "搜索无结果"是正常空结果信号，不是故障：返回带空 result 的响应，
+        // 交由 parse_search_results 得到 None → 下游按空结果优雅处理（不 502）。
+        if is_no_results_error(error) {
+            tracing::info!(
+                "web_search 无结果（MCP {} - {}），按空结果返回",
+                error.code.unwrap_or(-1),
+                error.message.as_deref().unwrap_or("")
+            );
+            return Ok(McpResponse {
+                error: None,
+                id: mcp_response.id,
+                jsonrpc: mcp_response.jsonrpc,
+                result: None,
+            });
+        }
+
         anyhow::bail!(
             "MCP error: {} - {}",
             error.code.unwrap_or(-1),
@@ -810,6 +843,50 @@ mod tests {
         let results = results.unwrap();
         assert_eq!(results.results.len(), 1);
         assert_eq!(results.results[0].title, "Test");
+    }
+
+    // 回归测试（原阶段 1B 复现测试，阶段 3A 翻转为修复后期望并改测真实代码）：
+    // 上游 MCP 对"搜不到结果"返回 -32602 "Tool returned no results"（HTTP 200，空结果信号）。
+    // 修复后 is_no_results_error 识别该特征 → call_mcp_api 返回空结果而非 bail!，
+    // 整条请求 200 而非 502，消除 Claude Code 的 retrying 1/10..10/10。
+    #[test]
+    fn test_mcp_no_results_recognized_as_empty_not_fatal() {
+        let body = r#"{"jsonrpc":"2.0","id":"x","error":{"code":-32602,"message":"Tool returned no results"}}"#;
+        let mcp_response: McpResponse = serde_json::from_str(body).unwrap();
+        let error = mcp_response.error.as_ref().unwrap();
+
+        // 修复后：识别为"无结果"空信号（不再致命）。
+        assert!(
+            is_no_results_error(error),
+            "-32602 'no results' 应被识别为空结果信号，而非致命错误"
+        );
+    }
+
+    // 防回归守门员：真正的 MCP 故障（其它 error code）仍按致命处理（保持 502 路径）。
+    #[test]
+    fn test_mcp_genuine_error_still_fatal() {
+        let body = r#"{"jsonrpc":"2.0","id":"x","error":{"code":-32603,"message":"Internal error"}}"#;
+        let mcp_response: McpResponse = serde_json::from_str(body).unwrap();
+        let error = mcp_response.error.as_ref().unwrap();
+
+        assert!(
+            !is_no_results_error(error),
+            "真正的 MCP 故障（非 'no results' 短语）不得被当作空结果，必须仍走 502"
+        );
+    }
+
+    // 防过度降级（review nit #1）：JSON-RPC 标准码 -32602 = "Invalid params"，若 message 不含
+    // "no results" 短语（即真正的畸形参数错误），不得被误吞为空结果，必须仍按致命处理。
+    #[test]
+    fn test_mcp_invalid_params_without_no_results_phrase_is_fatal() {
+        let body = r#"{"jsonrpc":"2.0","id":"x","error":{"code":-32602,"message":"Invalid params: query is required"}}"#;
+        let mcp_response: McpResponse = serde_json::from_str(body).unwrap();
+        let error = mcp_response.error.as_ref().unwrap();
+
+        assert!(
+            !is_no_results_error(error),
+            "-32602 但 message 非 'no results'（真·参数错误）不得被当作空结果，必须仍走 502"
+        );
     }
 
     #[test]

@@ -140,13 +140,26 @@ struct RoundOutcome {
 impl RoundOutcome {
     fn from_tool_accumulator_finish(
         mut tool_accumulator: ToolJsonAccumulator,
+        tool_name_map: &std::collections::HashMap<String, String>,
         mut outcome: Self,
     ) -> Self {
         outcome.text = crate::kiro::model::events::strip_tool_use_xml_leaks(&outcome.text);
         if outcome.tool_json_error.is_none() {
-            if let Err(e) = tool_accumulator.finish() {
-                tracing::error!("{}", e);
-                outcome.tool_json_error = Some(e.message());
+            match tool_accumulator.finish(tool_name_map) {
+                Ok(pending) => {
+                    // 空参数工具（EnterPlanMode 等）补发为合法 tool_use，纳入本轮 tool_uses。
+                    for completed in pending {
+                        outcome.tool_uses.push(DecodedToolUse {
+                            id: completed.id,
+                            name: completed.name,
+                            input: completed.input,
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("{}", e);
+                    outcome.tool_json_error = Some(e.message());
+                }
             }
         }
         outcome
@@ -272,6 +285,7 @@ async fn decode_round(
 
     RoundOutcome::from_tool_accumulator_finish(
         tool_accumulator,
+        tool_name_map,
         RoundOutcome {
             text,
             reasoning,
@@ -1114,6 +1128,7 @@ mod tests {
 
         let outcome = RoundOutcome::from_tool_accumulator_finish(
             acc,
+            &std::collections::HashMap::new(),
             RoundOutcome {
                 text: String::new(),
                 reasoning: String::new(),
