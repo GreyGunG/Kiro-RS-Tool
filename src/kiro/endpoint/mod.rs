@@ -168,7 +168,7 @@ pub fn default_is_gateway_timeout(body: &str) -> bool {
 /// 而非上游故障）。仅收录**精确 reason 值**，不收录 `ValidationException`
 /// 这类宽泛异常类型——后者语义过宽，裸子串匹配会把恰好携带该词的真实上游
 /// 瞬态故障误判为"不可重试"，反而杀掉本可重试恢复的请求。
-const CLIENT_VALIDATION_REASONS: &[&str] = &["TOOL_USE_RESULT_MISMATCH"];
+const CLIENT_VALIDATION_REASONS: &[&str] = &["TOOL_USE_RESULT_MISMATCH", "TOOL_SCHEMA_INVALID"];
 
 /// 触发同类判定的 message 级特征短语（用于无结构化 reason、仅文本报文的场景）
 ///

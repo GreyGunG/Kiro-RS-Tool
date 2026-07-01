@@ -29,6 +29,39 @@ use crate::image_resize::{ResizeConfig, maybe_shrink_image};
 /// 问题根源：Claude Code / MCP 工具定义使用 JSON Schema Draft 2020-12 语法（`$schema`、
 /// `exclusiveMinimum` 为数字等），kiro CLI endpoint 仅接受 Draft 07 格式，
 /// 不合规字段会导致 ValidationException "Improperly formed request."。
+/// 剥离顶层 oneOf/allOf/anyOf 并尽量从 variant 中恢复语义字段。
+///
+/// Bedrock/Kiro API 不支持顶层组合关键字（AWS ToolInputSchema 文档 + Claude Code issues #3383/#5973）。
+/// 当 schema 无 properties 时，遍历 combinator variant 提取第一个 type=object 变体的字段。
+fn strip_top_level_combinators(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    let has_properties_initially = obj.contains_key("properties");
+
+    for combinator in &["oneOf", "anyOf", "allOf"] {
+        let Some(serde_json::Value::Array(variants)) = obj.remove(*combinator) else {
+            continue;
+        };
+
+        // 原始 schema 已有 properties，或前一个 combinator 已提取过 → 纯剥离
+        if has_properties_initially || obj.contains_key("properties") {
+            continue;
+        }
+
+        // 从 variants 中找第一个 type=object 的变体，提取关键字段
+        for variant in variants {
+            let serde_json::Value::Object(m) = variant else { continue };
+            if m.get("type").and_then(|v| v.as_str()) != Some("object") {
+                continue;
+            }
+            for key in &["properties", "required", "additionalProperties", "description"] {
+                if let Some(val) = m.get(*key) {
+                    obj.entry(key.to_string()).or_insert(val.clone());
+                }
+            }
+            break;
+        }
+    }
+}
+
 fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     let serde_json::Value::Object(mut obj) = schema else {
         return serde_json::json!({
@@ -42,12 +75,17 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
     // 移除 $schema（kiro API 不接受此字段，且 Draft 2020-12 声明会触发校验失败）
     obj.remove("$schema");
 
-    // type（必须是字符串）
-    if !obj
-        .get("type")
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
-    {
+    strip_top_level_combinators(&mut obj);
+
+    // type 顶层必须是 "object"（Bedrock API ToolInputSchema 文档明确声明此硬约束）
+    let current_type = obj.get("type").and_then(|v| v.as_str()).map(|s| s.to_string());
+    if current_type.as_deref() != Some("object") {
+        if let Some(ref original) = current_type {
+            tracing::warn!(
+                original_type = %original,
+                "tool inputSchema 顶层 type 不是 object，已强制修正（Bedrock 硬约束）"
+            );
+        }
         obj.insert(
             "type".to_string(),
             serde_json::Value::String("object".to_string()),
