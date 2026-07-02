@@ -17,7 +17,7 @@ interface AddCredentialDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-type AuthMethod = 'social' | 'idc' | 'api_key'
+type AuthMethod = 'social' | 'idc' | 'external_idp' | 'api_key'
 
 export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogProps) {
   const [refreshToken, setRefreshToken] = useState('')
@@ -27,6 +27,11 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [apiRegion, setApiRegion] = useState('')
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
+  const [issuerUrl, setIssuerUrl] = useState('')
+  const [tokenEndpoint, setTokenEndpoint] = useState('')
+  const [scopes, setScopes] = useState('')
+  const [audience, setAudience] = useState('')
+  const [loginHint, setLoginHint] = useState('')
   const [priority, setPriority] = useState('0')
   const [machineId, setMachineId] = useState('')
   const [proxyUrl, setProxyUrl] = useState('')
@@ -44,6 +49,11 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setApiRegion('')
     setClientId('')
     setClientSecret('')
+    setIssuerUrl('')
+    setTokenEndpoint('')
+    setScopes('')
+    setAudience('')
+    setLoginHint('')
     setPriority('0')
     setMachineId('')
     setProxyUrl('')
@@ -53,6 +63,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   }
 
   const isApiKey = authMethod === 'api_key'
+  const isExternalIdp = authMethod === 'external_idp'
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -73,6 +84,10 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         toast.error('IdC/Builder-ID/IAM 认证需要填写 Client ID 和 Client Secret')
         return
       }
+      if (isExternalIdp && (!issuerUrl.trim() || !clientId.trim())) {
+        toast.error('External IdP 认证需要填写 Issuer URL 和 Client ID')
+        return
+      }
     }
 
     mutate(
@@ -83,7 +98,13 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         authRegion: authRegion.trim() || undefined,
         apiRegion: apiRegion.trim() || undefined,
         clientId: isApiKey ? undefined : clientId.trim() || undefined,
-        clientSecret: isApiKey ? undefined : clientSecret.trim() || undefined,
+        clientSecret: authMethod === 'idc' ? clientSecret.trim() || undefined : undefined,
+        provider: isExternalIdp ? 'ExternalIdp' : undefined,
+        issuerUrl: isExternalIdp ? issuerUrl.trim() || undefined : undefined,
+        tokenEndpoint: isExternalIdp ? tokenEndpoint.trim() || undefined : undefined,
+        scopes: isExternalIdp ? scopes.trim() || undefined : undefined,
+        audience: isExternalIdp ? audience.trim() || undefined : undefined,
+        loginHint: isExternalIdp ? loginHint.trim() || undefined : undefined,
         priority: parseInt(priority) || 0,
         machineId: machineId.trim() || undefined,
         proxyUrl: proxyUrl.trim() || undefined,
@@ -127,6 +148,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               >
                 <option value="social">Social</option>
                 <option value="idc">IdC/Builder-ID/IAM</option>
+                <option value="external_idp">External IdP</option>
                 <option value="api_key">API Key</option>
               </select>
             </div>
@@ -220,6 +242,86 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                     onChange={(e) => setClientSecret(e.target.value)}
                     disabled={isPending}
                   />
+                </div>
+              </>
+            )}
+
+            {/* External IdP 额外字段 */}
+            {isExternalIdp && (
+              <>
+                <div className="space-y-2">
+                  <label htmlFor="issuerUrl" className="text-sm font-medium">
+                    Issuer URL <span className="text-red-500">*</span>
+                  </label>
+                  <Input
+                    id="issuerUrl"
+                    placeholder="https://idp.example.com"
+                    value={issuerUrl}
+                    onChange={(e) => setIssuerUrl(e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="externalClientId" className="text-sm font-medium">
+                    Client ID <span className="text-red-500">*</span>
+                  </label>
+                  <Input
+                    id="externalClientId"
+                    placeholder="请输入 External IdP Client ID"
+                    value={clientId}
+                    onChange={(e) => setClientId(e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="scopes" className="text-sm font-medium">
+                    Scopes
+                  </label>
+                  <Input
+                    id="scopes"
+                    placeholder="openid profile email offline_access"
+                    value={scopes}
+                    onChange={(e) => setScopes(e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="tokenEndpoint" className="text-sm font-medium">
+                    Token Endpoint
+                  </label>
+                  <Input
+                    id="tokenEndpoint"
+                    placeholder="可留空，由 issuerUrl discovery"
+                    value={tokenEndpoint}
+                    onChange={(e) => setTokenEndpoint(e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-2">
+                    <label htmlFor="audience" className="text-sm font-medium">
+                      Audience
+                    </label>
+                    <Input
+                      id="audience"
+                      placeholder="可选"
+                      value={audience}
+                      onChange={(e) => setAudience(e.target.value)}
+                      disabled={isPending}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label htmlFor="loginHint" className="text-sm font-medium">
+                      Login Hint
+                    </label>
+                    <Input
+                      id="loginHint"
+                      placeholder="可选"
+                      value={loginHint}
+                      onChange={(e) => setLoginHint(e.target.value)}
+                      disabled={isPending}
+                    />
+                  </div>
                 </div>
               </>
             )}

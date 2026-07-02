@@ -201,6 +201,26 @@ pub struct AddCredentialRequest {
     #[serde(default)]
     pub start_url: Option<String>,
 
+    /// External IdP OIDC issuer URL
+    #[serde(default)]
+    pub issuer_url: Option<String>,
+
+    /// External IdP OIDC token endpoint（可选，通常由 discovery 得到）
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+
+    /// External IdP OIDC scopes（空格分隔）
+    #[serde(default)]
+    pub scopes: Option<String>,
+
+    /// External IdP OIDC audience（可选）
+    #[serde(default)]
+    pub audience: Option<String>,
+
+    /// External IdP OIDC login hint（可选）
+    #[serde(default)]
+    pub login_hint: Option<String>,
+
     /// 优先级（可选，默认 0）
     #[serde(default)]
     pub priority: u32,
@@ -899,6 +919,16 @@ pub struct KamExportAccount {
     pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

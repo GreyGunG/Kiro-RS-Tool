@@ -164,6 +164,21 @@ IdC 认证：
 }
 ```
 
+External IdP 认证：
+```json
+{
+   "refreshToken": "你的刷新token",
+   "expiresAt": "2025-12-31T02:32:45.144Z",
+   "authMethod": "external_idp",
+   "provider": "ExternalIdp",
+   "issuerUrl": "https://idp.example.com",
+   "clientId": "你的clientId",
+   "scopes": "openid profile email offline_access",
+   "audience": "可选",
+   "tokenEndpoint": "可选，留空时通过 issuerUrl discovery"
+}
+```
+
 ### 3. 启动
 
 ```bash
@@ -399,9 +414,14 @@ tar -czf kiro-rs-backup-$(date +%F).tar.gz /opt/kiro-rs/data/
 | `refreshToken` | string | OAuth 刷新令牌                                  |
 | `profileArn`   | string | AWS Profile ARN（可选，登录时返回）                   |
 | `expiresAt`    | string | Token 过期时间 (RFC3339)                        |
-| `authMethod`   | string | 认证方式：`social` 或 `idc`                       |
-| `clientId`     | string | IdC 登录的客户端 ID（IdC 认证必填）                     |
+| `authMethod`   | string | 认证方式：`social`、`idc`、`external_idp` 或 `api_key` |
+| `clientId`     | string | IdC / External IdP 的客户端 ID（对应认证方式必填）        |
 | `clientSecret` | string | IdC 登录的客户端密钥（IdC 认证必填）                      |
+| `issuerUrl`    | string | External IdP OIDC issuer URL（external_idp 必填） |
+| `tokenEndpoint`| string | External IdP token endpoint（可选，默认从 issuerUrl discovery） |
+| `scopes`       | string | External IdP OIDC scopes（空格分隔）                |
+| `audience`     | string | External IdP OIDC audience（可选）                 |
+| `loginHint`    | string | External IdP login hint（可选，仅导入/保存）          |
 | `priority`     | number | 凭据优先级，数字越小越优先，默认为 0                         |
 | `region`       | string | 凭据级 Auth Region, 兼容字段                       |
 | `authRegion`   | string | 凭据级 Auth Region，用于 Token 刷新, 未配置时回退到 region |
@@ -417,6 +437,7 @@ tar -czf kiro-rs-backup-$(date +%F).tar.gz /opt/kiro-rs/data/
 说明：
 - IdC / Builder-ID / IAM 在本项目里属于同一种登录方式，配置时统一使用 `authMethod: "idc"`
 - 为兼容旧配置，`builder-id` / `iam` 仍可被识别，但会按 `idc` 处理
+- External IdP 使用 `authMethod: "external_idp"`；兼容误拼 `externel_idp` / `externel-idp`，会按 `external_idp` 处理
 - **`ksk_` 前缀的 API Key 凭据必须将 `endpoint` 设为 `cli`**（或将 `config.defaultEndpoint` 设为 `cli`），否则请求会因协议不匹配而失败
 
 #### 单凭据格式（旧格式，向后兼容）
