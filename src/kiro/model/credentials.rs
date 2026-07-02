@@ -65,7 +65,7 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
 
-    /// 认证方式 (social / idc)
+    /// 认证方式 (social / idc / external_idp / api_key)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_method: Option<String>,
 
@@ -84,6 +84,26 @@ pub struct KiroCredentials {
     /// SSO Start URL（Enterprise / IAM Identity Center 账号专用）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_url: Option<String>,
+
+    /// External IdP OIDC issuer URL（external_idp 认证需要）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer_url: Option<String>,
+
+    /// External IdP OIDC token endpoint（可选，通常由 issuerUrl discovery 得到）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+
+    /// External IdP OIDC scopes（空格分隔）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+
+    /// External IdP OIDC audience（可选）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+
+    /// External IdP OIDC login hint（可选，仅登录流程使用；导入时保留）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_hint: Option<String>,
 
     /// 凭据优先级（数字越小优先级越高，默认为 0）
     #[serde(default)]
@@ -178,6 +198,11 @@ impl std::fmt::Debug for KiroCredentials {
             .field("client_id", &fmt_redacted(&self.client_id))
             .field("client_secret", &fmt_redacted(&self.client_secret))
             .field("start_url", &self.start_url)
+            .field("issuer_url", &self.issuer_url)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("scopes", &self.scopes)
+            .field("audience", &self.audience)
+            .field("login_hint", &self.login_hint)
             .field("priority", &self.priority)
             .field("region", &self.region)
             .field("auth_region", &self.auth_region)
@@ -200,6 +225,14 @@ fn canonicalize_auth_method_value(value: &str) -> &str {
         "idc"
     } else if value.eq_ignore_ascii_case("api_key") || value.eq_ignore_ascii_case("apikey") {
         "api_key"
+    } else if value.eq_ignore_ascii_case("external_idp")
+        || value.eq_ignore_ascii_case("external-idp")
+        || value.eq_ignore_ascii_case("externalIdp")
+        || value.eq_ignore_ascii_case("externel_idp")
+        || value.eq_ignore_ascii_case("externel-idp")
+        || value.eq_ignore_ascii_case("externelIdp")
+    {
+        "external_idp"
     } else {
         value
     }
@@ -378,6 +411,18 @@ impl KiroCredentials {
                 .unwrap_or(false)
     }
 
+    pub fn is_external_idp_credential(&self) -> bool {
+        self.auth_method
+            .as_deref()
+            .map(|m| canonicalize_auth_method_value(m).eq_ignore_ascii_case("external_idp"))
+            .unwrap_or(false)
+            || self
+                .provider
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case("ExternalIdp"))
+                .unwrap_or(false)
+    }
+
     pub fn is_enterprise_identity(&self) -> bool {
         let has_enterprise_start_url = self
             .start_url
@@ -407,6 +452,11 @@ impl KiroCredentials {
             .as_deref()
             .map(|m| {
                 m.eq_ignore_ascii_case("external_idp")
+                    || m.eq_ignore_ascii_case("external-idp")
+                    || m.eq_ignore_ascii_case("externalIdp")
+                    || m.eq_ignore_ascii_case("externel_idp")
+                    || m.eq_ignore_ascii_case("externel-idp")
+                    || m.eq_ignore_ascii_case("externelIdp")
                     || m.eq_ignore_ascii_case("enterprise")
                     || m.eq_ignore_ascii_case("iam_sso")
             })
@@ -543,6 +593,11 @@ mod tests {
             client_id: None,
             client_secret: None,
             start_url: None,
+            issuer_url: None,
+            token_endpoint: None,
+            scopes: None,
+            audience: None,
+            login_hint: None,
             priority: 0,
             region: None,
             auth_region: None,
@@ -812,6 +867,11 @@ mod tests {
             client_id: None,
             client_secret: None,
             start_url: None,
+            issuer_url: None,
+            token_endpoint: None,
+            scopes: None,
+            audience: None,
+            login_hint: None,
             priority: 0,
             region: Some("eu-west-1".to_string()),
             auth_region: None,
@@ -845,6 +905,11 @@ mod tests {
             client_id: None,
             client_secret: None,
             start_url: None,
+            issuer_url: None,
+            token_endpoint: None,
+            scopes: None,
+            audience: None,
+            login_hint: None,
             priority: 0,
             region: None,
             auth_region: None,
@@ -948,6 +1013,38 @@ mod tests {
     }
 
     #[test]
+    fn test_external_idp_fields_and_auth_alias() {
+        let json = r#"{
+            "refreshToken": "short-refresh",
+            "authMethod": "externel_idp",
+            "provider": "ExternalIdp",
+            "issuerUrl": "https://idp.example.com",
+            "tokenEndpoint": "https://idp.example.com/oauth/token",
+            "clientId": "client123",
+            "scopes": "openid profile email offline_access",
+            "audience": "api://kiro",
+            "loginHint": "user@example.com"
+        }"#;
+
+        let mut creds = KiroCredentials::from_json(json).unwrap();
+        creds.canonicalize_auth_method();
+
+        assert_eq!(creds.auth_method.as_deref(), Some("external_idp"));
+        assert!(creds.is_external_idp_credential());
+        assert_eq!(creds.issuer_url.as_deref(), Some("https://idp.example.com"));
+        assert_eq!(
+            creds.token_endpoint.as_deref(),
+            Some("https://idp.example.com/oauth/token")
+        );
+        assert_eq!(
+            creds.scopes.as_deref(),
+            Some("openid profile email offline_access")
+        );
+        assert_eq!(creds.audience.as_deref(), Some("api://kiro"));
+        assert_eq!(creds.login_hint.as_deref(), Some("user@example.com"));
+    }
+
+    #[test]
     fn test_region_roundtrip() {
         // 测试序列化和反序列化的往返一致性
         let original = KiroCredentials {
@@ -961,6 +1058,11 @@ mod tests {
             client_id: None,
             client_secret: None,
             start_url: None,
+            issuer_url: None,
+            token_endpoint: None,
+            scopes: None,
+            audience: None,
+            login_hint: None,
             priority: 3,
             region: Some("us-west-2".to_string()),
             auth_region: None,

@@ -43,6 +43,24 @@ pub struct IdcRefreshResponse {
     pub profile_arn: Option<String>,
 }
 
+// ============ External IdP OIDC 流程 ============
+
+/// External IdP OIDC discovery 响应。当前只依赖 token_endpoint。
+#[derive(Debug, Deserialize)]
+pub struct ExternalIdpDiscoveryResponse {
+    pub token_endpoint: String,
+}
+
+/// External IdP refresh_token grant 响应。
+#[derive(Debug, Deserialize)]
+pub struct ExternalIdpRefreshResponse {
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_in: Option<i64>,
+}
+
 // ============ AWS SSO OIDC 设备授权流程 ============
 
 /// 注册 OIDC 客户端请求体

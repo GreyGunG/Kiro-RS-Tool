@@ -30,6 +30,15 @@ interface CredentialInput {
   machineId?: string
   kiroApiKey?: string
   authMethod?: string
+  provider?: string
+  accessToken?: string
+  profileArn?: string
+  expiresAt?: string
+  issuerUrl?: string
+  tokenEndpoint?: string
+  scopes?: string
+  audience?: string
+  loginHint?: string
   endpoint?: string
   email?: string
   proxyUrl?: string
@@ -46,6 +55,26 @@ interface VerificationResult {
   credentialId?: number
   rollbackStatus?: 'success' | 'failed' | 'skipped'
   rollbackError?: string
+}
+
+type OAuthAuthMethod = 'social' | 'idc' | 'external_idp'
+
+function normalizeOAuthAuthMethod(value?: string): OAuthAuthMethod | undefined {
+  const normalized = value?.trim().toLowerCase()
+  if (!normalized) return undefined
+  if (normalized === 'social') return 'social'
+  if (normalized === 'idc' || normalized === 'builder-id' || normalized === 'iam') return 'idc'
+  if (
+    normalized === 'external_idp' ||
+    normalized === 'external-idp' ||
+    normalized === 'externalidp' ||
+    normalized === 'externel_idp' ||
+    normalized === 'externel-idp' ||
+    normalized === 'externelidp'
+  ) {
+    return 'external_idp'
+  }
+  return undefined
 }
 
 
@@ -293,20 +322,39 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           const token = cred.refreshToken!.trim()
           const clientId = cred.clientId?.trim() || undefined
           const clientSecret = cred.clientSecret?.trim() || undefined
-          const authMethod = clientId && clientSecret ? 'idc' : 'social'
+          const importedAuthMethod = normalizeOAuthAuthMethod(cred.authMethod)
+          const provider = cred.provider?.trim() || undefined
+          const isExternalIdp =
+            importedAuthMethod === 'external_idp' ||
+            provider === 'ExternalIdp'
+          const authMethod = isExternalIdp
+            ? 'external_idp'
+            : importedAuthMethod || (clientId && clientSecret ? 'idc' : 'social')
 
           // idc 模式下必须同时提供 clientId 和 clientSecret
           if (authMethod === 'social' && (clientId || clientSecret)) {
             throw new Error('idc 模式需要同时提供 clientId 和 clientSecret')
           }
+          if (authMethod === 'external_idp' && (!cred.issuerUrl?.trim() || !clientId)) {
+            throw new Error('external_idp 模式需要 issuerUrl 和 clientId')
+          }
 
           const addedCred = await addCredential({
             refreshToken: token,
+            accessToken: cred.accessToken?.trim() || undefined,
+            profileArn: cred.profileArn?.trim() || undefined,
+            expiresAt: cred.expiresAt?.trim() || undefined,
             authMethod,
+            provider: isExternalIdp ? provider || 'ExternalIdp' : provider,
             authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
             apiRegion: cred.apiRegion?.trim() || undefined,
             clientId,
-            clientSecret,
+            clientSecret: authMethod === 'idc' ? clientSecret : undefined,
+            issuerUrl: cred.issuerUrl?.trim() || undefined,
+            tokenEndpoint: cred.tokenEndpoint?.trim() || undefined,
+            scopes: cred.scopes?.trim() || undefined,
+            audience: cred.audience?.trim() || undefined,
+            loginHint: cred.loginHint?.trim() || undefined,
             priority: cred.priority || 0,
             machineId: cred.machineId?.trim() || undefined,
             endpoint: cred.endpoint?.trim() || undefined,

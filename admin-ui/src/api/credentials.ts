@@ -76,6 +76,11 @@ export interface KamExportAccount {
   authMethod?: string
   region?: string
   startUrl?: string
+  issuerUrl?: string
+  tokenEndpoint?: string
+  scopes?: string
+  audience?: string
+  loginHint?: string
   clientId?: string
   clientSecret?: string
   refreshToken?: string

@@ -37,6 +37,11 @@ interface KamAccount {
     authMethod?: string
     provider?: string
     startUrl?: string
+    issuerUrl?: string
+    tokenEndpoint?: string
+    scopes?: string
+    audience?: string
+    loginHint?: string
   }
   machineId?: string
   status?: string
@@ -54,6 +59,26 @@ function normalizeExpiresAt(value: unknown): string | undefined {
   if (typeof value === 'string') {
     const trimmed = value.trim()
     return trimmed.length > 0 ? trimmed : undefined
+  }
+  return undefined
+}
+
+type OAuthAuthMethod = 'social' | 'idc' | 'external_idp'
+
+function normalizeOAuthAuthMethod(value?: string): OAuthAuthMethod | undefined {
+  const normalized = value?.trim().toLowerCase()
+  if (!normalized) return undefined
+  if (normalized === 'social') return 'social'
+  if (normalized === 'idc' || normalized === 'builder-id' || normalized === 'iam') return 'idc'
+  if (
+    normalized === 'external_idp' ||
+    normalized === 'external-idp' ||
+    normalized === 'externalidp' ||
+    normalized === 'externel_idp' ||
+    normalized === 'externel-idp' ||
+    normalized === 'externelidp'
+  ) {
+    return 'external_idp'
   }
   return undefined
 }
@@ -101,6 +126,11 @@ function normalizeKamAccount(item: unknown): unknown {
     const authMethod = typeof obj.authMethod === 'string' ? obj.authMethod : undefined
     const provider = typeof obj.provider === 'string' ? obj.provider : undefined
     const startUrl = typeof obj.startUrl === 'string' ? obj.startUrl : undefined
+    const issuerUrl = typeof obj.issuerUrl === 'string' ? obj.issuerUrl : undefined
+    const tokenEndpoint = typeof obj.tokenEndpoint === 'string' ? obj.tokenEndpoint : undefined
+    const scopes = typeof obj.scopes === 'string' ? obj.scopes : undefined
+    const audience = typeof obj.audience === 'string' ? obj.audience : undefined
+    const loginHint = typeof obj.loginHint === 'string' ? obj.loginHint : undefined
 
     return {
       email,
@@ -120,6 +150,11 @@ function normalizeKamAccount(item: unknown): unknown {
         authMethod,
         provider,
         startUrl,
+        issuerUrl,
+        tokenEndpoint,
+        scopes,
+        audience,
+        loginHint,
       },
     }
   }
@@ -371,12 +406,21 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
         try {
           const clientId = cred.clientId?.trim() || undefined
           const clientSecret = cred.clientSecret?.trim() || undefined
-          const authMethod = clientId && clientSecret ? 'idc' : 'social'
+          const importedAuthMethod = normalizeOAuthAuthMethod(cred.authMethod)
           const provider = cred.provider?.trim() || account.idp?.trim() || undefined
+          const isExternalIdp =
+            importedAuthMethod === 'external_idp' ||
+            provider === 'ExternalIdp'
+          const authMethod = isExternalIdp
+            ? 'external_idp'
+            : importedAuthMethod || (clientId && clientSecret ? 'idc' : 'social')
 
           // idc 模式下必须同时提供 clientId 和 clientSecret
           if (authMethod === 'social' && (clientId || clientSecret)) {
             throw new Error('idc 模式需要同时提供 clientId 和 clientSecret')
+          }
+          if (authMethod === 'external_idp' && (!cred.issuerUrl?.trim() || !clientId)) {
+            throw new Error('external_idp 模式需要 issuerUrl 和 clientId')
           }
 
           // 无代理时从池中随机分配一个
@@ -390,11 +434,16 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
             profileArn: cred.profileArn?.trim() || undefined,
             expiresAt: normalizeExpiresAt(cred.expiresAt),
             authMethod,
-            provider,
+            provider: isExternalIdp ? provider || 'ExternalIdp' : provider,
             authRegion: cred.region?.trim() || undefined,
             clientId,
-            clientSecret,
+            clientSecret: authMethod === 'idc' ? clientSecret : undefined,
             startUrl: cred.startUrl?.trim() || undefined,
+            issuerUrl: cred.issuerUrl?.trim() || undefined,
+            tokenEndpoint: cred.tokenEndpoint?.trim() || undefined,
+            scopes: cred.scopes?.trim() || undefined,
+            audience: cred.audience?.trim() || undefined,
+            loginHint: cred.loginHint?.trim() || undefined,
             machineId: account.machineId?.trim() || undefined,
             email: account.email?.trim() || undefined,
             proxyUrl,
