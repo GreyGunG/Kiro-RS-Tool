@@ -28,3 +28,7 @@
 .ace-tool/
 .codegraph/
 .claude/
+.agents/
+.codex/
+.cursor/
+.trellis/
