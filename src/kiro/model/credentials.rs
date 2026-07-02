@@ -533,6 +533,20 @@ impl KiroCredentials {
                 .map(|m| m.eq_ignore_ascii_case("api_key") || m.eq_ignore_ascii_case("apikey"))
                 .unwrap_or(false)
     }
+
+    /// 上游用来区分 Bearer token 来源的附加请求头。
+    ///
+    /// API Key 和 External IdP 都放在 Authorization: Bearer 中，但
+    /// CodeWhisperer 需要额外 token type 才会按正确身份体系处理。
+    pub fn bearer_token_type_header(&self) -> Option<(&'static str, &'static str)> {
+        if self.is_api_key_credential() {
+            Some(("tokentype", "API_KEY"))
+        } else if self.is_external_idp_credential() {
+            Some(("TokenType", "EXTERNAL_IDP"))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1042,6 +1056,29 @@ mod tests {
         );
         assert_eq!(creds.audience.as_deref(), Some("api://kiro"));
         assert_eq!(creds.login_hint.as_deref(), Some("user@example.com"));
+    }
+
+    #[test]
+    fn test_bearer_token_type_header() {
+        let api_key = KiroCredentials {
+            auth_method: Some("api_key".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            api_key.bearer_token_type_header(),
+            Some(("tokentype", "API_KEY"))
+        );
+
+        let external_idp = KiroCredentials {
+            auth_method: Some("external_idp".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            external_idp.bearer_token_type_header(),
+            Some(("TokenType", "EXTERNAL_IDP"))
+        );
+
+        assert_eq!(KiroCredentials::default().bearer_token_type_header(), None);
     }
 
     #[test]

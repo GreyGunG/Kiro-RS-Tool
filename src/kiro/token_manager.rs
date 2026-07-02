@@ -6,6 +6,7 @@
 use anyhow::{Context, bail};
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::{Mutex, RwLock};
+use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as TokioMutex;
@@ -332,22 +333,21 @@ async fn refresh_external_idp_token(
         .client_id
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("External IdP 刷新需要 clientId"))?;
-    let token_endpoint = resolve_external_idp_token_endpoint(credentials, config, proxy).await?;
-
-    let client = build_client(proxy, 60, config.tls_backend)?;
-    let mut form = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_token.to_string()),
-        ("client_id", client_id.to_string()),
-    ];
-    if let Some(scopes) = credentials
+    let scopes = credentials
         .scopes
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
-        form.push(("scope", scopes.to_string()));
-    }
+        .ok_or_else(|| anyhow::anyhow!("External IdP 刷新需要 scopes"))?;
+    let token_endpoint = resolve_external_idp_token_endpoint(credentials, config, proxy).await?;
+
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let form = vec![
+        ("grant_type", "refresh_token".to_string()),
+        ("client_id", client_id.to_string()),
+        ("refresh_token", refresh_token.to_string()),
+        ("scope", scopes.to_string()),
+    ];
 
     let response = client
         .post(&token_endpoint)
@@ -514,6 +514,77 @@ fn rest_api_region_candidates(sso_region: &str) -> [&'static str; 2] {
     }
 }
 
+fn apply_bearer_token_type_header(
+    request: RequestBuilder,
+    credentials: &KiroCredentials,
+) -> RequestBuilder {
+    if let Some((name, value)) = credentials.bearer_token_type_header() {
+        request.header(name, value)
+    } else {
+        request
+    }
+}
+
+async fn get_external_idp_usage_limits(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<UsageLimitsResponse> {
+    let candidates = rest_api_region_candidates(credentials.effective_api_region(config));
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let mut last_error: Option<String> = None;
+
+    for (idx, region) in candidates.iter().enumerate() {
+        let host = format!("codewhisperer.{}.amazonaws.com", region);
+        let url = format!(
+            "https://{host}/getUsageLimits?isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
+        );
+
+        let request = client
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("x-amz-user-agent", "aws-sdk-js/1.0.0 KiroIDE")
+            .header("user-agent", "aws-sdk-js/1.0.0 KiroIDE")
+            .header("host", &host)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Connection", "close")
+            .header("TokenType", "EXTERNAL_IDP");
+
+        let response = request.send().await?;
+        let status = response.status();
+        if status.is_success() {
+            let data: UsageLimitsResponse = response.json().await?;
+            return Ok(data);
+        }
+
+        let body_text = response.text().await.unwrap_or_default();
+        if status.as_u16() == 403 && idx + 1 < candidates.len() {
+            tracing::debug!(
+                "External IdP getUsageLimits 在 {} 返回 403，尝试备用 CodeWhisperer 端点 {}",
+                region,
+                candidates[idx + 1]
+            );
+            last_error = Some(format!("{} {}", status, body_text));
+            continue;
+        }
+
+        let error_msg = match status.as_u16() {
+            401 => "External IdP 认证失败，Token 无效或已过期",
+            403 => "External IdP 权限不足，无法获取使用额度",
+            429 => "External IdP 请求过于频繁，已被限流",
+            500..=599 => "CodeWhisperer 服务暂时不可用",
+            _ => "External IdP 获取使用额度失败",
+        };
+        bail!("{}: {} {}", error_msg, status, body_text);
+    }
+
+    bail!(
+        "External IdP 权限不足，无法获取使用额度: {}",
+        last_error.unwrap_or_else(|| "无可用端点".to_string())
+    )
+}
+
 /// 获取使用额度信息
 pub(crate) async fn get_usage_limits(
     credentials: &KiroCredentials,
@@ -522,6 +593,10 @@ pub(crate) async fn get_usage_limits(
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<UsageLimitsResponse> {
     tracing::debug!("正在获取使用额度信息...");
+
+    if credentials.is_external_idp_credential() {
+        return get_external_idp_usage_limits(credentials, config, token, proxy).await;
+    }
 
     let candidates = rest_api_region_candidates(credentials.effective_auth_region(config));
     let machine_id = machine_id::generate_from_credentials(credentials, config);
@@ -551,7 +626,7 @@ pub(crate) async fn get_usage_limits(
             host, profile_arn_query
         );
 
-        let mut request = client
+        let request = client
             .get(&url)
             .header("x-amz-user-agent", &amz_user_agent)
             .header("user-agent", &user_agent)
@@ -561,9 +636,7 @@ pub(crate) async fn get_usage_limits(
             .header("Authorization", format!("Bearer {}", token))
             .header("Connection", "close");
 
-        if credentials.is_api_key_credential() {
-            request = request.header("tokentype", "API_KEY");
-        }
+        let request = apply_bearer_token_type_header(request, credentials);
 
         let response = request.send().await?;
         let status = response.status();
@@ -640,7 +713,7 @@ pub(crate) async fn get_available_models(
             host, profile_arn_query
         );
 
-        let mut request = client
+        let request = client
             .get(&url)
             .header("x-amz-user-agent", &amz_user_agent)
             .header("user-agent", &user_agent)
@@ -650,9 +723,7 @@ pub(crate) async fn get_available_models(
             .header("Authorization", format!("Bearer {}", token))
             .header("Connection", "close");
 
-        if credentials.is_api_key_credential() {
-            request = request.header("tokentype", "API_KEY");
-        }
+        let request = apply_bearer_token_type_header(request, credentials);
 
         let response = request.send().await?;
         let status = response.status();
@@ -711,7 +782,7 @@ async fn fetch_enterprise_profile_arn(
         let host = format!("q.{}.amazonaws.com", region);
         let url = format!("https://{}/", host);
 
-        let mut request = client
+        let request = client
             .post(&url)
             .header("content-type", "application/x-amz-json-1.0")
             .header(
@@ -727,9 +798,7 @@ async fn fetch_enterprise_profile_arn(
             .header("Connection", "close")
             .body(r#"{"maxResults":10}"#);
 
-        if credentials.is_api_key_credential() {
-            request = request.header("tokentype", "API_KEY");
-        }
+        let request = apply_bearer_token_type_header(request, credentials);
 
         let response = request.send().await?;
         let status = response.status();
@@ -809,7 +878,7 @@ pub(crate) async fn set_user_preference(
         let host = format!("q.{}.amazonaws.com", region);
         let url = format!("https://{}/setUserPreference", host);
 
-        let mut request = client
+        let request = client
             .post(&url)
             .header("x-amz-user-agent", &amz_user_agent)
             .header("user-agent", &user_agent)
@@ -821,9 +890,7 @@ pub(crate) async fn set_user_preference(
             .header("Connection", "close")
             .json(&body);
 
-        if credentials.is_api_key_credential() {
-            request = request.header("tokentype", "API_KEY");
-        }
+        let request = apply_bearer_token_type_header(request, credentials);
 
         let response = request.send().await?;
         let status = response.status();
@@ -3620,6 +3687,31 @@ mod tests {
         assert!(
             err_msg.contains("API Key 凭据不支持刷新"),
             "期望错误消息包含 'API Key 凭据不支持刷新'，实际: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_token_requires_external_idp_scopes() {
+        let config = Config::default();
+        let credentials = KiroCredentials {
+            auth_method: Some("external_idp".to_string()),
+            provider: Some("ExternalIdp".to_string()),
+            refresh_token: Some("short-refresh".to_string()),
+            client_id: Some("client-id".to_string()),
+            token_endpoint: Some(
+                "https://login.microsoftonline.com/tenant/oauth2/v2.0/token".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let result = refresh_token(&credentials, &config, None).await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("External IdP 刷新需要 scopes"),
+            "期望错误消息包含 scopes，实际: {}",
             err_msg
         );
     }

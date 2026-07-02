@@ -82,8 +82,8 @@ impl KiroEndpoint for CliEndpoint {
             .header("amz-sdk-request", "attempt=1; max=3")
             .header("Authorization", format!("Bearer {}", ctx.token));
 
-        if ctx.credentials.is_api_key_credential() {
-            req = req.header("tokentype", "API_KEY");
+        if let Some((name, value)) = ctx.credentials.bearer_token_type_header() {
+            req = req.header(name, value);
         }
         req
     }
@@ -100,8 +100,8 @@ impl KiroEndpoint for CliEndpoint {
         if let Some(arn) = ctx.credentials.effective_profile_arn() {
             req = req.header("x-amzn-kiro-profile-arn", arn);
         }
-        if ctx.credentials.is_api_key_credential() {
-            req = req.header("tokentype", "API_KEY");
+        if let Some((name, value)) = ctx.credentials.bearer_token_type_header() {
+            req = req.header(name, value);
         }
         req
     }
@@ -392,5 +392,30 @@ mod tests {
             .build()
             .unwrap();
         assert!(req.headers().get("x-amzn-kiro-profile-arn").is_none());
+    }
+
+    #[test]
+    fn test_cli_external_idp_adds_token_type_header() {
+        let endpoint = CliEndpoint::new();
+        let config = Config::default();
+        let credentials = KiroCredentials {
+            auth_method: Some("external_idp".to_string()),
+            ..Default::default()
+        };
+        let ctx = RequestContext {
+            credentials: &credentials,
+            token: "token",
+            machine_id: "machine",
+            config: &config,
+        };
+
+        let req = endpoint
+            .decorate_api(reqwest::Client::new().post("https://example.com"), &ctx)
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get("TokenType").and_then(|v| v.to_str().ok()),
+            Some("EXTERNAL_IDP")
+        );
     }
 }

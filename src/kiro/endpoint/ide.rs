@@ -2,6 +2,7 @@
 //!
 //! 对应 Kiro IDE 客户端目前使用的 AWS CodeWhisperer 端点：
 //! - API: `https://q.{api_region}.amazonaws.com/generateAssistantResponse`
+//!   （External IdP 使用 `https://codewhisperer.{api_region}.amazonaws.com/generateAssistantResponse`）
 //! - MCP: `https://q.{api_region}.amazonaws.com/mcp`
 //!
 //! 请求头使用 aws-sdk-js User-Agent 标识。请求体会在根对象上注入 `profileArn`。
@@ -27,7 +28,14 @@ impl IdeEndpoint {
         ctx.credentials.effective_api_region(ctx.config)
     }
 
-    fn host(&self, ctx: &RequestContext<'_>) -> String {
+    fn api_host(&self, ctx: &RequestContext<'_>) -> String {
+        if ctx.credentials.is_external_idp_credential() {
+            return format!("codewhisperer.{}.amazonaws.com", self.api_region(ctx));
+        }
+        format!("q.{}.amazonaws.com", self.api_region(ctx))
+    }
+
+    fn mcp_host(&self, ctx: &RequestContext<'_>) -> String {
         format!("q.{}.amazonaws.com", self.api_region(ctx))
     }
 
@@ -62,14 +70,11 @@ impl KiroEndpoint for IdeEndpoint {
     }
 
     fn api_url(&self, ctx: &RequestContext<'_>) -> String {
-        format!(
-            "https://q.{}.amazonaws.com/generateAssistantResponse",
-            self.api_region(ctx)
-        )
+        format!("https://{}/generateAssistantResponse", self.api_host(ctx))
     }
 
     fn mcp_url(&self, ctx: &RequestContext<'_>) -> String {
-        format!("https://q.{}.amazonaws.com/mcp", self.api_region(ctx))
+        format!("https://{}/mcp", self.mcp_host(ctx))
     }
 
     fn decorate_api(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder {
@@ -78,13 +83,13 @@ impl KiroEndpoint for IdeEndpoint {
             .header("x-amzn-kiro-agent-mode", "vibe")
             .header("x-amz-user-agent", self.x_amz_user_agent(ctx))
             .header("user-agent", self.user_agent(ctx))
-            .header("host", self.host(ctx))
+            .header("host", self.api_host(ctx))
             .header("amz-sdk-invocation-id", Uuid::new_v4().to_string())
             .header("amz-sdk-request", "attempt=1; max=3")
             .header("Authorization", format!("Bearer {}", ctx.token));
 
-        if ctx.credentials.is_api_key_credential() {
-            req = req.header("tokentype", "API_KEY");
+        if let Some((name, value)) = ctx.credentials.bearer_token_type_header() {
+            req = req.header(name, value);
         }
         req
     }
@@ -93,7 +98,7 @@ impl KiroEndpoint for IdeEndpoint {
         let mut req = req
             .header("x-amz-user-agent", self.x_amz_user_agent(ctx))
             .header("user-agent", self.user_agent(ctx))
-            .header("host", self.host(ctx))
+            .header("host", self.mcp_host(ctx))
             .header("amz-sdk-invocation-id", Uuid::new_v4().to_string())
             .header("amz-sdk-request", "attempt=1; max=3")
             .header("Authorization", format!("Bearer {}", ctx.token));
@@ -101,8 +106,8 @@ impl KiroEndpoint for IdeEndpoint {
         if let Some(arn) = ctx.credentials.effective_profile_arn() {
             req = req.header("x-amzn-kiro-profile-arn", arn);
         }
-        if ctx.credentials.is_api_key_credential() {
-            req = req.header("tokentype", "API_KEY");
+        if let Some((name, value)) = ctx.credentials.bearer_token_type_header() {
+            req = req.header(name, value);
         }
         req
     }
@@ -274,5 +279,39 @@ mod tests {
             .build()
             .unwrap();
         assert!(req.headers().get("x-amzn-kiro-profile-arn").is_none());
+    }
+
+    #[test]
+    fn test_ide_external_idp_uses_codewhisperer_api_surface() {
+        let endpoint = super::IdeEndpoint::new();
+        let config = Config::default();
+        let credentials = KiroCredentials {
+            auth_method: Some("external_idp".to_string()),
+            ..Default::default()
+        };
+        let ctx = RequestContext {
+            credentials: &credentials,
+            token: "token",
+            machine_id: "machine",
+            config: &config,
+        };
+
+        assert_eq!(
+            endpoint.api_url(&ctx),
+            "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
+        );
+
+        let req = endpoint
+            .decorate_api(reqwest::Client::new().post(endpoint.api_url(&ctx)), &ctx)
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get("TokenType").and_then(|v| v.to_str().ok()),
+            Some("EXTERNAL_IDP")
+        );
+        assert_eq!(
+            req.headers().get("host").and_then(|v| v.to_str().ok()),
+            Some("codewhisperer.us-east-1.amazonaws.com")
+        );
     }
 }

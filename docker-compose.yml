@@ -1,11 +1,18 @@
 services:
   kiro-rs:
-    image: ${KIRO_RS_IMAGE:-zyphrzero/kiro-rs:latest}
+    build:
+      context: .
+    image: ${KIRO_RS_IMAGE:-kiro-rs:local}
     container_name: kiro-rs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "8990:8990"
+    environment:
+      RUST_LOG: "kiro_rs=debug,reqwest=debug,h2=info,hyper=info"
+      RUST_BACKTRACE: "1"
+      KIRO_LOG_RESPONSE_BODY: "true"
+      KIRO_LOG_RESPONSE_BODY_MAX_CHARS: "12000"
     volumes:
-      - ./data/:/app/config/
+      - ${KIRO_RS_CONFIG_DIR:-/home/user/service/kiro.rs/config/}:/app/config/
     restart: unless-stopped
