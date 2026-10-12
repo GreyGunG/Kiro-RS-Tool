@@ -102,12 +102,23 @@ pub struct WebSearchResult {
     pub public_domain: Option<bool>,
 }
 
+/// 是否为 Anthropic 原生 WebSearch 服务端工具：带 `type: web_search_*`。
+///
+/// 客户端自己声明的同名工具（只有 name + input_schema、没有 type）不算。
+/// 把客户端同名工具送进本地 MCP 搜索循环时取不到 `query`，搜索会失败，
+/// 并让已经开始的响应流以 `api_error` 结束（客户端表现为整轮运行失败）。
+fn is_native_web_search_tool(t: &super::types::Tool) -> bool {
+    t.tool_type
+        .as_deref()
+        .is_some_and(|ty| ty.starts_with("web_search"))
+}
+
 /// 检查请求是否为纯 WebSearch 请求
 ///
-/// 条件：tools 有且只有一个，且 name 为 web_search
+/// 条件：tools 有且只有一个，且是 Anthropic 原生 WebSearch 服务端工具（带 `type: web_search_*`）
 pub fn has_web_search_tool(req: &MessagesRequest) -> bool {
     req.tools.as_ref().is_some_and(|tools| {
-        tools.len() == 1 && tools.first().is_some_and(|t| t.name == "web_search")
+        tools.len() == 1 && tools.first().is_some_and(is_native_web_search_tool)
     })
 }
 
@@ -119,7 +130,7 @@ pub fn has_web_search_tool(req: &MessagesRequest) -> bool {
 pub(crate) fn has_web_search_among_tools(req: &MessagesRequest) -> bool {
     req.tools
         .as_ref()
-        .is_some_and(|tools| tools.len() > 1 && tools.iter().any(|t| t.name == "web_search"))
+        .is_some_and(|tools| tools.len() > 1 && tools.iter().any(is_native_web_search_tool))
 }
 
 const DIRECT_WEB_SEARCH_PREFIX: &str = "Perform a web search for the query: ";
@@ -659,6 +670,102 @@ mod tests {
 
         // 多个工具时不应该被识别为纯 websearch 请求
         assert!(!has_web_search_tool(&req));
+    }
+
+    /// 客户端自带同名工具（只有 name + input_schema、没有 type）不是原生 WebSearch：
+    /// 它由客户端自己执行，不能进中继的本地搜索循环。
+    #[test]
+    fn test_client_declared_web_search_tool_is_not_native() {
+        use crate::anthropic::types::{Message, Tool};
+
+        let client_search_tool = Tool {
+            tool_type: None,
+            name: "web_search".to_string(),
+            description: "Search the web for current information.".to_string(),
+            input_schema: std::collections::BTreeMap::from([(
+                "type".to_string(),
+                serde_json::json!("object"),
+            )]),
+            max_uses: None,
+            cache_control: None,
+        };
+        let other_tool = Tool {
+            tool_type: None,
+            name: "bash".to_string(),
+            description: "Run a shell command".to_string(),
+            input_schema: Default::default(),
+            max_uses: None,
+            cache_control: None,
+        };
+
+        let req_with = |tools: Vec<Tool>| MessagesRequest {
+            model: "claude-sonnet-4".to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: serde_json::json!("test"),
+            }],
+            stream: true,
+            system: None,
+            tools: Some(tools),
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        let single = req_with(vec![client_search_tool.clone()]);
+        assert!(!has_web_search_tool(&single));
+        assert!(!has_web_search_among_tools(&single));
+
+        let mixed = req_with(vec![client_search_tool, other_tool]);
+        assert!(!has_web_search_tool(&mixed));
+        assert!(
+            !has_web_search_among_tools(&mixed),
+            "客户端自定义的同名工具不得触发本地搜索循环"
+        );
+    }
+
+    /// 原生 WebSearch（带 type）混在其他工具里时，仍然要走本地搜索循环。
+    #[test]
+    fn test_native_web_search_among_tools_still_detected() {
+        use crate::anthropic::types::{Message, Tool};
+
+        let native = Tool {
+            tool_type: Some("web_search_20250305".to_string()),
+            name: "web_search".to_string(),
+            description: String::new(),
+            input_schema: Default::default(),
+            max_uses: Some(8),
+            cache_control: None,
+        };
+        let other = Tool {
+            tool_type: None,
+            name: "bash".to_string(),
+            description: "Run a shell command".to_string(),
+            input_schema: Default::default(),
+            max_uses: None,
+            cache_control: None,
+        };
+
+        let req = MessagesRequest {
+            model: "claude-sonnet-4".to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: serde_json::json!("test"),
+            }],
+            stream: true,
+            system: None,
+            tools: Some(vec![native, other]),
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+
+        assert!(!has_web_search_tool(&req));
+        assert!(has_web_search_among_tools(&req));
     }
 
     #[test]

@@ -692,7 +692,7 @@ volumes:
 
 1. **凭证安全**: 请妥善保管 `credentials.json` 文件，不要提交到版本控制
 2. **Token 刷新**: 服务会自动刷新过期的 Token，无需手动干预
-3. **WebSearch 工具**: 当 `tools` 列表仅包含一个 `web_search` 工具时，会走内置 WebSearch 转换逻辑
+3. **WebSearch 工具**: 只有 Anthropic 原生 WebSearch（带 `type: web_search_*`，或 Claude Code 的 `WebSearch` 且 schema 为 `{ query: string }`）才走内置 WebSearch 逻辑；客户端自行声明、不带 `type` 的同名 `web_search` 工具按普通工具转发，由客户端执行
 
 ## 项目结构
 
